@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Creates S3 Bucket, Cloudwatch Logs, and Lambda Function
+Description: Creates S3 Bucket, Cloudwatch Logs, and Lambda Function, and EventBridge Daily Trigger
 Resources:
   LambdaRole:
     Type: 'AWS::IAM::Role'
@@ -34,6 +34,22 @@ Resources:
                   - 'logs:CreateLogStream'
                   - 'logs:PutLogEvents'
                 Resource: !GetAtt LogGroup.Arn
+  CronLambdaRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MyLambdaFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt CronLambdaRule.Arn
+  CronLambdaRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: TriggerLambdaSpotify
+      State: ENABLED
+      ScheduleExpression: rate(1 day)
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction.Arn
+          Id: LambdaSpotifyTriggerEvent
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -62,12 +78,15 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.10
       Handler: index.lambda_handler
+      Timeout: 120
       Code:
         ZipFile: | 
           import requests
           import base64
           from json import loads
           from datetime import datetime
+          import boto3
+          import os 
 
           class SpotifyAPI():
               def __init__(self, client_id=None, client_secret=None, token=None):
@@ -156,15 +175,21 @@ Resources:
                       csv_data = csv_data + record_str + '\n'
                       print(record_str)
                   
-                  with open('playlist-data-{}.csv'.format(datetime.now().strftime('%m-%d-%Y')), 'w+') as f:
-                      f.write(csv_data)
+                  s3 = boto3.resource('s3')
+                  
+                  object = s3.Object(
+                      bucket_name='spotify-playlist-data',
+                      key='playlist-data-{}.csv'.format(datetime.now().strftime('%m-%d-%Y'))
+                  )
+                  
+                  object.put(Body=csv_data)
                   
                   return csv_data
-        
+
 
                 
           def lambda_handler(event, context):
-              spotifyAPI = SpotifyAPI(client_id="<INSERT CLIENT ID HERE>", client_secret="INSERT CLIENT SECRET HERE")
+              spotifyAPI = SpotifyAPI(client_id= os.getenv('CLIENT_ID'), client_secret=os.getenv('CLIENT_SECRET'))
               token = spotifyAPI.token
 
               # gets tracks of Top 50 - Global
@@ -173,7 +198,7 @@ Resources:
 
               playlist_data = spotifyAPI.get_playlist(TOP_50_GLOBAL_ID)
               csv_data = spotifyAPI.process_playlist_data(playlist_data)
-    
+
               return { 'message': 'Successfully wrote to S3\n{}'.format(csv_data) }
       Tags:
         - Key: Lambda
